@@ -1,0 +1,669 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { 
+  LayoutDashboard, 
+  Package, 
+  ShoppingCart, 
+  Activity, 
+  Plus, 
+  Trash2, 
+  Edit, 
+  Search,
+  DollarSign,
+  TrendingUp,
+  AlertCircle,
+  Briefcase,
+  X,
+  Check,
+  Info
+} from 'lucide-react';
+
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection } from 'firebase/firestore';
+
+// Configuración de Firebase (Proporcionada por el entorno)
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+const formatCurrency = (amount) => {
+  return new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amount);
+};
+
+const formatDate = (dateString) => {
+  const options = { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' };
+  return new Date(dateString).toLocaleDateString('es-MX', options);
+};
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  
+  // Datos ahora inician vacíos
+  const [products, setProducts] = useState([]);
+  const [sales, setSales] = useState([]);
+
+  // Estados para el POS
+  const [cart, setCart] = useState([]);
+  const [posSearch, setPosSearch] = useState('');
+
+  // Estados para Modales e Interfaz
+  const [isProductModalOpen, setIsProductModalOpen] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [productForm, setProductForm] = useState({ name: '', category: 'Anillos', cost: '', price: '', stock: '' });
+  
+  // UI States para reemplazar alerts y confirms
+  const [toast, setToast] = useState({ show: false, message: '', type: 'success' });
+  const [confirmDialog, setConfirmDialog] = useState({ show: false, message: '', onConfirm: null });
+
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Error de autenticación:", error);
+      }
+    };
+    initAuth();
+    
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+
+    // Escuchar productos
+    const productsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'products');
+    const unsubProducts = onSnapshot(productsRef, (snapshot) => {
+      const productsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setProducts(productsData);
+    }, (error) => console.error("Error cargando productos:", error));
+
+    // Escuchar ventas
+    const salesRef = collection(db, 'artifacts', appId, 'users', user.uid, 'sales');
+    const unsubSales = onSnapshot(salesRef, (snapshot) => {
+      const salesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      // Ordenar por fecha descendente (más recientes primero)
+      salesData.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setSales(salesData);
+    }, (error) => console.error("Error cargando ventas:", error));
+
+    return () => {
+      unsubProducts();
+      unsubSales();
+    };
+  }, [user]);
+
+  const metrics = useMemo(() => {
+    const totalRevenue = sales.reduce((sum, sale) => sum + sale.total, 0);
+    const totalProfit = sales.reduce((sum, sale) => sum + sale.profit, 0);
+    
+    const inventoryCostValue = products.reduce((sum, p) => sum + (p.cost * p.stock), 0);
+    const inventoryRetailValue = products.reduce((sum, p) => sum + (p.price * p.stock), 0);
+    const potentialProfit = inventoryRetailValue - inventoryCostValue;
+    
+    const lowStockItems = products.filter(p => p.stock < 5);
+
+    return { totalRevenue, totalProfit, inventoryCostValue, inventoryRetailValue, potentialProfit, lowStockItems };
+  }, [products, sales]);
+
+  const showToast = (message, type = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: 'success' }), 3000);
+  };
+
+  const handleOpenProductModal = (product = null) => {
+    if (product) {
+      setEditingProduct(product.id);
+      setProductForm({ ...product });
+    } else {
+      setEditingProduct(null);
+      setProductForm({ name: '', category: 'Anillos', cost: '', price: '', stock: '' });
+    }
+    setIsProductModalOpen(true);
+  };
+
+  const handleSaveProduct = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+
+    const productId = editingProduct || `PROD-${Date.now()}`;
+    const newProduct = {
+      name: productForm.name,
+      category: productForm.category,
+      cost: parseFloat(productForm.cost),
+      price: parseFloat(productForm.price),
+      stock: parseInt(productForm.stock, 10)
+    };
+
+    try {
+      const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'products', productId);
+      await setDoc(docRef, newProduct);
+      setIsProductModalOpen(false);
+      showToast(editingProduct ? 'Producto actualizado' : 'Producto agregado');
+    } catch (error) {
+      console.error("Error al guardar:", error);
+      showToast('Error al guardar el producto', 'error');
+    }
+  };
+
+  const promptDeleteProduct = (id) => {
+    setConfirmDialog({
+      show: true,
+      message: '¿Estás seguro de eliminar permanentemente este producto del inventario?',
+      onConfirm: async () => {
+        if (!user) return;
+        try {
+          await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'products', id));
+          showToast('Producto eliminado');
+        } catch (error) {
+          console.error("Error eliminando:", error);
+          showToast('Error al eliminar', 'error');
+        }
+        setConfirmDialog({ show: false, message: '', onConfirm: null });
+      }
+    });
+  };
+
+  const filteredPosProducts = products.filter(p => 
+    p.name.toLowerCase().includes(posSearch.toLowerCase()) || 
+    p.category.toLowerCase().includes(posSearch.toLowerCase())
+  );
+
+  const addToCart = (product) => {
+    if (product.stock <= 0) return showToast('No hay stock disponible', 'error');
+    
+    const existing = cart.find(item => item.productId === product.id);
+    if (existing) {
+      if (existing.qty >= product.stock) return showToast('Has alcanzado el límite de stock', 'error');
+      setCart(cart.map(item => item.productId === product.id ? { ...item, qty: item.qty + 1 } : item));
+    } else {
+      setCart([...cart, { productId: product.id, name: product.name, price: product.price, cost: product.cost, qty: 1 }]);
+    }
+  };
+
+  const removeFromCart = (productId) => {
+    setCart(cart.filter(item => item.productId !== productId));
+  };
+
+  const cartTotal = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+  const cartTotalCost = cart.reduce((sum, item) => sum + (item.cost * item.qty), 0);
+
+  const handleCheckout = async () => {
+    if (cart.length === 0 || !user) return;
+
+    const saleId = `V-${Date.now().toString().slice(-6)}`;
+    const newSale = {
+      date: new Date().toISOString(),
+      items: [...cart],
+      total: cartTotal,
+      totalCost: cartTotalCost,
+      profit: cartTotal - cartTotalCost
+    };
+
+    try {
+      // 1. Guardar la venta
+      const saleRef = doc(db, 'artifacts', appId, 'users', user.uid, 'sales', saleId);
+      await setDoc(saleRef, newSale);
+
+      // 2. Descontar el stock de los productos vendidos
+      for (const item of cart) {
+        const pRef = doc(db, 'artifacts', appId, 'users', user.uid, 'products', item.productId);
+        const pData = products.find(p => p.id === item.productId);
+        if (pData) {
+          await updateDoc(pRef, { stock: pData.stock - item.qty });
+        }
+      }
+
+      setCart([]);
+      showToast('Venta procesada con éxito');
+      setActiveTab('dashboard'); 
+    } catch (error) {
+      console.error("Error en caja:", error);
+      showToast('Error al procesar la venta', 'error');
+    }
+  };
+
+
+  const renderDashboard = () => (
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <h2 className="text-2xl font-semibold text-slate-800">Panel de Control General</h2>
+      
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <MetricCard 
+          title="Ventas Totales" 
+          value={formatCurrency(metrics.totalRevenue)} 
+          icon={<DollarSign className="text-emerald-500" />} 
+          bg="bg-emerald-50"
+        />
+        <MetricCard 
+          title="Ganancia Neta" 
+          value={formatCurrency(metrics.totalProfit)} 
+          icon={<TrendingUp className="text-amber-500" />} 
+          bg="bg-amber-50"
+          subtitle="Utilidad libre"
+        />
+        <MetricCard 
+          title="Valor Inv. (Venta)" 
+          value={formatCurrency(metrics.inventoryRetailValue)} 
+          icon={<Briefcase className="text-blue-500" />} 
+          bg="bg-blue-50"
+          subtitle={`Costo: ${formatCurrency(metrics.inventoryCostValue)}`}
+        />
+        <MetricCard 
+          title="Alertas de Stock" 
+          value={metrics.lowStockItems.length.toString()} 
+          icon={<AlertCircle className="text-red-500" />} 
+          bg="bg-red-50"
+          subtitle="Productos por agotarse"
+        />
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+          <h3 className="text-lg font-medium text-slate-800 mb-4 flex items-center gap-2">
+            <AlertCircle className="w-5 h-5 text-amber-500" />
+            Atención: Bajo Stock
+          </h3>
+          {metrics.lowStockItems.length === 0 ? (
+            <p className="text-slate-500 text-sm">Todo el inventario está en niveles óptimos o no hay productos.</p>
+          ) : (
+            <div className="space-y-3">
+              {metrics.lowStockItems.map(item => (
+                <div key={item.id} className="flex justify-between items-center p-3 bg-red-50 rounded-lg border border-red-100">
+                  <div>
+                    <p className="font-medium text-slate-800">{item.name}</p>
+                    <p className="text-xs text-slate-500">{item.category}</p>
+                  </div>
+                  <span className="px-3 py-1 bg-red-100 text-red-700 font-bold rounded-full text-sm">
+                    Quedan: {item.stock}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
+          <h3 className="text-lg font-medium text-slate-800 mb-4 flex items-center gap-2">
+            <Activity className="w-5 h-5 text-blue-500" />
+            Últimos Movimientos
+          </h3>
+          <div className="space-y-4">
+            {sales.slice(0, 4).map(sale => (
+              <div key={sale.id} className="flex justify-between items-center pb-3 border-b border-slate-100 last:border-0">
+                <div>
+                  <p className="font-medium text-slate-800">{sale.id}</p>
+                  <p className="text-xs text-slate-500">{formatDate(sale.date)}</p>
+                </div>
+                <div className="text-right">
+                  <p className="font-bold text-emerald-600">{formatCurrency(sale.total)}</p>
+                  <p className="text-xs text-amber-600">Ganancia: {formatCurrency(sale.profit)}</p>
+                </div>
+              </div>
+            ))}
+            {sales.length === 0 && <p className="text-slate-500 text-sm">No hay ventas registradas aún.</p>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderInventory = () => (
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <div className="flex justify-between items-center">
+        <h2 className="text-2xl font-semibold text-slate-800">Catálogo e Inventario</h2>
+        <button 
+          onClick={() => handleOpenProductModal()}
+          className="flex items-center gap-2 bg-amber-600 hover:bg-amber-700 text-white px-4 py-2 rounded-lg transition-colors font-medium shadow-sm"
+        >
+          <Plus className="w-4 h-4" /> Agregar Joya
+        </button>
+      </div>
+
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 text-sm">
+                <th className="p-4 font-medium">Producto</th>
+                <th className="p-4 font-medium">Categoría</th>
+                <th className="p-4 font-medium">Stock</th>
+                <th className="p-4 font-medium">Costo</th>
+                <th className="p-4 font-medium">Precio Venta</th>
+                <th className="p-4 font-medium">Margen</th>
+                <th className="p-4 font-medium text-right">Acciones</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {products.map(product => {
+                const margin = ((product.price - product.cost) / product.price) * 100;
+                return (
+                  <tr key={product.id} className="hover:bg-slate-50 transition-colors">
+                    <td className="p-4 font-medium text-slate-800">{product.name}</td>
+                    <td className="p-4 text-slate-600"><span className="bg-slate-100 px-2 py-1 rounded text-xs">{product.category}</span></td>
+                    <td className="p-4">
+                      <span className={`font-semibold ${product.stock <= 5 ? 'text-red-600' : 'text-slate-700'}`}>
+                        {product.stock}
+                      </span>
+                    </td>
+                    <td className="p-4 text-slate-500">{formatCurrency(product.cost)}</td>
+                    <td className="p-4 font-semibold text-slate-800">{formatCurrency(product.price)}</td>
+                    <td className="p-4 text-emerald-600 font-medium">{margin.toFixed(1)}%</td>
+                    <td className="p-4 text-right flex justify-end gap-2">
+                      <button onClick={() => handleOpenProductModal(product)} className="p-2 text-slate-400 hover:text-blue-600 transition-colors bg-slate-100 rounded-lg"><Edit className="w-4 h-4" /></button>
+                      <button onClick={() => promptDeleteProduct(product.id)} className="p-2 text-slate-400 hover:text-red-600 transition-colors bg-slate-100 rounded-lg"><Trash2 className="w-4 h-4" /></button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {products.length === 0 && (
+                <tr>
+                  <td colSpan="7" className="p-8 text-center text-slate-500">No hay productos en el inventario. Haz clic en "Agregar Joya" para empezar.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {isProductModalOpen && (
+        <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center p-6 border-b border-slate-100">
+              <h3 className="text-xl font-semibold text-slate-800">{editingProduct ? 'Editar Producto' : 'Nuevo Producto'}</h3>
+              <button type="button" onClick={() => setIsProductModalOpen(false)} className="text-slate-400 hover:text-slate-600"><X className="w-5 h-5"/></button>
+            </div>
+            <form onSubmit={handleSaveProduct} className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Nombre de la Joya</label>
+                <input required type="text" value={productForm.name} onChange={e => setProductForm({...productForm, name: e.target.value})} className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none transition-all" placeholder="Ej. Anillo de Oro..." />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Categoría</label>
+                  <select required value={productForm.category} onChange={e => setProductForm({...productForm, category: e.target.value})} className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none bg-white">
+                    <option value="Anillos">Anillos</option>
+                    <option value="Collares">Collares</option>
+                    <option value="Pulseras">Pulseras</option>
+                    <option value="Pendientes">Pendientes</option>
+                    <option value="Relojes">Relojes</option>
+                    <option value="Conjuntos">Conjuntos</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Stock Inicial</label>
+                  <input required type="number" min="0" value={productForm.stock} onChange={e => setProductForm({...productForm, stock: e.target.value})} className="w-full border border-slate-300 rounded-lg p-2.5 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none" />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Costo (Compra)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-3 text-slate-500">$</span>
+                    <input required type="number" min="0" step="0.01" value={productForm.cost} onChange={e => setProductForm({...productForm, cost: e.target.value})} className="w-full border border-slate-300 rounded-lg p-2.5 pl-7 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none" />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 mb-1">Precio (Venta)</label>
+                  <div className="relative">
+                    <span className="absolute left-3 top-3 text-slate-500">$</span>
+                    <input required type="number" min="0" step="0.01" value={productForm.price} onChange={e => setProductForm({...productForm, price: e.target.value})} className="w-full border border-slate-300 rounded-lg p-2.5 pl-7 focus:ring-2 focus:ring-amber-500 focus:border-amber-500 outline-none" />
+                  </div>
+                </div>
+              </div>
+              <div className="pt-4 flex gap-3">
+                <button type="button" onClick={() => setIsProductModalOpen(false)} className="flex-1 px-4 py-2.5 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 transition-colors font-medium">Cancelar</button>
+                <button type="submit" className="flex-1 px-4 py-2.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 transition-colors font-medium">Guardar Joya</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderPOS = () => (
+    <div className="flex flex-col md:flex-row h-auto min-h-[calc(100vh-6rem)] gap-6 animate-in fade-in duration-500">
+      <div className="flex-1 flex flex-col bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="p-4 border-b border-slate-200 bg-slate-50">
+          <div className="relative">
+            <Search className="absolute left-3 top-3 text-slate-400 w-5 h-5" />
+            <input 
+              type="text" 
+              placeholder="Buscar joya por nombre o categoría..." 
+              value={posSearch}
+              onChange={(e) => setPosSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-amber-500 outline-none"
+            />
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 max-h-[60vh] md:max-h-full">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {filteredPosProducts.map(product => (
+              <div 
+                key={product.id} 
+                onClick={() => addToCart(product)}
+                className={`border rounded-xl p-4 cursor-pointer transition-all hover:shadow-md ${product.stock > 0 ? 'border-slate-200 bg-white hover:border-amber-400' : 'border-red-100 bg-slate-50 opacity-60 cursor-not-allowed'}`}
+              >
+                <div className="flex justify-between items-start mb-2">
+                  <span className="bg-slate-100 text-slate-600 text-xs px-2 py-1 rounded">{product.category}</span>
+                  <span className={`text-xs font-semibold px-2 py-1 rounded-full ${product.stock > 0 ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+                    Stock: {product.stock}
+                  </span>
+                </div>
+                <h4 className="font-medium text-slate-800 line-clamp-2 min-h-[2.5rem] mb-2">{product.name}</h4>
+                <p className="text-lg font-bold text-slate-900">{formatCurrency(product.price)}</p>
+              </div>
+            ))}
+            {filteredPosProducts.length === 0 && (
+              <div className="col-span-full py-8 text-center text-slate-500">
+                No hay productos que coincidan con la búsqueda.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div className="w-full md:w-96 bg-white rounded-xl shadow-sm border border-slate-200 flex flex-col overflow-hidden shrink-0">
+        <div className="p-4 bg-slate-900 text-white">
+          <h3 className="text-lg font-semibold flex items-center gap-2">
+            <ShoppingCart className="w-5 h-5" /> Ticket de Venta
+          </h3>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px]">
+          {cart.length === 0 ? (
+            <div className="h-full flex flex-col items-center justify-center text-slate-400">
+              <Package className="w-12 h-12 mb-2 opacity-50" />
+              <p>Selecciona productos para vender</p>
+            </div>
+          ) : (
+            cart.map(item => (
+              <div key={item.productId} className="flex justify-between items-start border-b border-slate-100 pb-3">
+                <div className="flex-1 pr-2">
+                  <p className="font-medium text-slate-800 text-sm">{item.name}</p>
+                  <p className="text-slate-500 text-xs">{item.qty} x {formatCurrency(item.price)}</p>
+                </div>
+                <div className="text-right flex flex-col items-end gap-1">
+                  <p className="font-semibold text-slate-800">{formatCurrency(item.qty * item.price)}</p>
+                  <button onClick={() => removeFromCart(item.productId)} className="text-red-500 hover:text-red-700 text-xs">Quitar</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        <div className="p-4 bg-slate-50 border-t border-slate-200">
+          <div className="flex justify-between items-center mb-4">
+            <span className="text-slate-600 font-medium">Total a cobrar:</span>
+            <span className="text-2xl font-bold text-slate-900">{formatCurrency(cartTotal)}</span>
+          </div>
+          <button 
+            onClick={handleCheckout}
+            disabled={cart.length === 0}
+            className={`w-full py-3 rounded-lg font-semibold text-lg flex items-center justify-center gap-2 transition-all ${cart.length > 0 ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-md' : 'bg-slate-200 text-slate-400 cursor-not-allowed'}`}
+          >
+            <Check className="w-5 h-5" /> Completar Venta
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderSales = () => (
+    <div className="space-y-6 animate-in fade-in duration-500">
+      <h2 className="text-2xl font-semibold text-slate-800">Historial y Análisis de Ventas</h2>
+      
+      <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-slate-900 text-white text-sm">
+                <th className="p-4 font-medium">Folio / Fecha</th>
+                <th className="p-4 font-medium">Artículos Vendidos</th>
+                <th className="p-4 font-medium">Costo (Inversión)</th>
+                <th className="p-4 font-medium">Total Cobrado</th>
+                <th className="p-4 font-medium">Ganancia Neta</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {sales.map(sale => (
+                <tr key={sale.id} className="hover:bg-slate-50 transition-colors">
+                  <td className="p-4">
+                    <p className="font-bold text-slate-800">{sale.id}</p>
+                    <p className="text-xs text-slate-500">{formatDate(sale.date)}</p>
+                  </td>
+                  <td className="p-4">
+                    <ul className="text-sm text-slate-600 list-disc list-inside">
+                      {sale.items.map((item, idx) => (
+                        <li key={idx} className="truncate max-w-[200px]" title={item.name}>
+                          {item.qty}x {item.name}
+                        </li>
+                      ))}
+                    </ul>
+                  </td>
+                  <td className="p-4 text-slate-500">{formatCurrency(sale.totalCost)}</td>
+                  <td className="p-4 font-bold text-slate-800">{formatCurrency(sale.total)}</td>
+                  <td className="p-4 font-semibold text-emerald-600 bg-emerald-50/50">
+                    +{formatCurrency(sale.profit)}
+                  </td>
+                </tr>
+              ))}
+              {sales.length === 0 && (
+                <tr>
+                  <td colSpan="5" className="p-8 text-center text-slate-500">No hay ventas registradas aún.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col md:flex-row h-screen bg-slate-100 font-sans">
+      
+      <aside className="w-full md:w-64 bg-slate-900 text-white flex flex-col shadow-xl z-10 shrink-0">
+        <div className="p-6 flex items-center gap-3 border-b border-slate-800">
+          <div className="w-10 h-10 bg-gradient-to-br from-amber-400 to-amber-600 rounded-lg flex items-center justify-center shadow-lg">
+            <span className="font-serif font-bold text-xl text-slate-900">J</span>
+          </div>
+          <div>
+            <h1 className="font-bold text-lg tracking-wide text-amber-500 uppercase">Aura Joyería</h1>
+            <p className="text-xs text-slate-400">Sistema Empresarial</p>
+          </div>
+        </div>
+        
+        <nav className="flex-1 p-4 flex flex-row overflow-x-auto md:flex-col gap-2">
+          <NavItem icon={<LayoutDashboard />} label="Dashboard" active={activeTab === 'dashboard'} onClick={() => setActiveTab('dashboard')} />
+          <NavItem icon={<ShoppingCart />} label="Caja (POS)" active={activeTab === 'pos'} onClick={() => setActiveTab('pos')} />
+          <NavItem icon={<Package />} label="Inventario" active={activeTab === 'inventory'} onClick={() => setActiveTab('inventory')} />
+          <NavItem icon={<Activity />} label="Ventas" active={activeTab === 'sales'} onClick={() => setActiveTab('sales')} />
+        </nav>
+      </aside>
+
+      <main className="flex-1 overflow-y-auto p-4 md:p-8 relative">
+        {activeTab === 'dashboard' && renderDashboard()}
+        {activeTab === 'inventory' && renderInventory()}
+        {activeTab === 'pos' && renderPOS()}
+        {activeTab === 'sales' && renderSales()}
+      </main>
+
+      {}
+      {/* Toast Notification (Reemplaza los alerts) */}
+      {toast.show && (
+        <div className={`fixed bottom-4 right-4 z-50 px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-bottom-5 fade-in duration-300 text-white ${toast.type === 'error' ? 'bg-red-600' : 'bg-emerald-600'}`}>
+          {toast.type === 'error' ? <AlertCircle className="w-5 h-5"/> : <Check className="w-5 h-5"/>}
+          <span className="font-medium">{toast.message}</span>
+        </div>
+      )}
+
+      {/* Confirmación (Reemplaza el confirm nativo) */}
+      {confirmDialog.show && (
+        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center p-4 z-[60] backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full animate-in zoom-in-95 duration-200">
+            <div className="flex items-center gap-3 text-red-600 mb-4">
+              <AlertCircle className="w-6 h-6" />
+              <h3 className="text-lg font-bold text-slate-900">Confirmar Acción</h3>
+            </div>
+            <p className="text-slate-600 mb-6">{confirmDialog.message}</p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setConfirmDialog({ show: false, message: '', onConfirm: null })} 
+                className="flex-1 px-4 py-2 border border-slate-300 text-slate-700 rounded-lg hover:bg-slate-50 font-medium transition-colors"
+              >
+                Cancelar
+              </button>
+              <button 
+                onClick={() => confirmDialog.onConfirm && confirmDialog.onConfirm()} 
+                className="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium transition-colors shadow-sm"
+              >
+                Sí, Eliminar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// Componentes Reutilizables
+function NavItem({ icon, label, active, onClick }) {
+  return (
+    <button 
+      onClick={onClick}
+      className={`flex md:w-full items-center gap-3 px-4 py-3 rounded-lg transition-all duration-200 whitespace-nowrap ${
+        active 
+          ? 'bg-amber-600 text-white shadow-md' 
+          : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+      }`}
+    >
+      {React.cloneElement(icon, { className: 'w-5 h-5 shrink-0' })}
+      <span className="font-medium hidden md:inline-block">{label}</span>
+    </button>
+  );
+}
+
+function MetricCard({ title, value, icon, bg, subtitle }) {
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-6 flex items-center gap-4 transition-transform hover:-translate-y-1 duration-300">
+      <div className={`w-12 h-12 rounded-full ${bg} flex items-center justify-center shrink-0`}>
+        {icon}
+      </div>
+      <div>
+        <p className="text-sm font-medium text-slate-500">{title}</p>
+        <p className="text-2xl font-bold text-slate-900">{value}</p>
+        {subtitle && <p className="text-xs text-slate-400 mt-1">{subtitle}</p>}
+      </div>
+    </div>
+  );
+}
